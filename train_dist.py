@@ -15,7 +15,7 @@ import colossalai
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
-from colossalai.booster.plugin import LowLevelZeroPlugin, TorchDDPPlugin
+from colossalai.booster.plugin import LowLevelZeroPlugin, TorchDDPPlugin,HybridParallelPlugin
 from colossalai.cluster import DistCoordinator
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.utils import get_current_device
@@ -39,6 +39,21 @@ from opendit.vae.wrapper import AutoencoderKLWrapper
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+import time 
+
+class Timer(object):
+
+    def __init__(self, name=None, coordinator=None):
+        self.name = name
+        self.coordinator = coordinator
+
+    def __enter__(self):
+        self.tstart = time.time()
+
+    def __exit__(self, type, value, traceback):
+        if self.name and self.coordinator.is_master():
+            print('[%s]' % self.name + 'Elapsed: %s' % (time.time() - self.tstart))
+
 
 
 def main(args):
@@ -93,10 +108,21 @@ def main(args):
             max_norm=args.grad_clip,
         )
     elif args.plugin == "ddp":
-        plugin = TorchDDPPlugin()
+        plugin = TorchDDPPlugin(find_unused_parameters=True, static_graph= True, gradient_as_bucket_view= True)
+    elif args.plugin == "hybrid":
+        plugin = HybridParallelPlugin(
+            tp_size= dist.get_world_size(),
+            pp_size=1,
+            num_microbatches=None,
+            microbatch_size=args.batch_size,
+            enable_all_optimization=True,
+            zero_stage=1,
+            precision="fp16",
+            initial_scale=1,
+        )
     else:
         raise ValueError(f"Unknown plugin {args.plugin}")
-    booster = Booster(plugin=plugin)
+    booster = Booster(device=device, plugin=plugin)
 
     # ==============================
     # Initialize Process Group
@@ -134,7 +160,9 @@ def main(args):
     elif args.mixed_precision == "fp32" and args.plugin == "ddp":
         dtype = torch.float32
     else:
-        raise ValueError(f"Unknown mixed precision {args.mixed_precision}")
+        dtype = torch.bfloat16
+        pass
+       # raise ValueError(f"Unknown mixed precision {args.mixed_precision}")
 
     # Shared model config for two models
     model_config = {
@@ -228,7 +256,6 @@ def main(args):
         if coordinator.is_master():
             dist.barrier()
 
-    print(args.num_samples)
     if args.num_samples == -1:
         use_sample = True
         dataloader = prepare_dataloader(
@@ -308,44 +335,53 @@ def main(args):
                     y = batch["text"]
                 else:
                     #x, y = next(dataloader_iter)
-                    dict_= next(dataloader_iter)
-                    x = dict_["image"]
-                    y = dict_['label'].squeeze()
-                    #print(dict_)
-                    #if isinstance(y, int):
-                    #    y = y.to(device)
+                    with Timer('load_data',coordinator):
+                        dict_= next(dataloader_iter)
+                        x = dict_["image"]
+                        y = dict_['label'].squeeze()
+                        #print(dict_)
+                        #if isinstance(y, int):
+                        #    y = y.to(device)
 
-                    x = x.to(device)
-                    y = y.to(device)
+                        x = x.to(device)
+                        y = y.to(device)
 
                 # VAE encode
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
-                    x = vae.encode(x)
-                    # x = b c t h ,w
-                    if not args.use_video:
-                        x = x.latent_dist.sample().mul_(0.18215)
+                    with Timer('vae encoder',coordinator):
+                        x = vae.encode(x)
+                        # x = b c t h ,w
+                        if not args.use_video:
+                            x = x.latent_dist.sample().mul_(0.18215)
 
                 # Diffusion
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 model_kwargs = dict(y=y)
-                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+                with Timer('forward',coordinator):
+                    loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 loss = loss_dict["loss"].mean()
-                booster.backward(loss=loss, optimizer=optimizer)
-                optimizer.step()
-                optimizer.zero_grad()
 
-                # Update EMA
-                update_ema(ema, model.module, optimizer=optimizer, sharded=shard_ema)
+                with Timer('calculate loss',coordinator):
+                    booster.backward(loss=loss, optimizer=optimizer)
+                with Timer('backward',coordinator):
+                    optimizer.step()
+                    optimizer.zero_grad()
 
+                with Timer('update ema',coordinator):
+                    # Update EMA
+                    update_ema(ema, model.module, optimizer=optimizer, sharded=shard_ema)
+
+                with Timer('Log loss',coordinator):
                 # Log loss values:
-                all_reduce_mean(loss)
-                global_step = epoch * num_steps_per_epoch + step
-                pbar.set_postfix({"loss": loss.item(), "step": step, "global_step": global_step})
+                    global_step = epoch * num_steps_per_epoch + step
+                    if (global_step + 1) % args.log_every == 0: 
+                        all_reduce_mean(loss)
+                        pbar.set_postfix({"loss": loss.item(), "step": step, "global_step": global_step})  
 
-                # Log to tensorboard
-                if coordinator.is_master() and (global_step + 1) % args.log_every == 0:
-                    writer.add_scalar("loss", loss.item(), global_step)
+                    # Log to tensorboard
+                    if coordinator.is_master() and (global_step + 1) % args.log_every == 0:  
+                        writer.add_scalar("loss", loss.item(), global_step)
 
                 # Save checkpoint
                 if args.ckpt_every > 0 and (global_step + 1) % (args.ckpt_every * num_steps_per_epoch) == 0:

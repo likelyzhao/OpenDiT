@@ -29,7 +29,7 @@ from opendit.diffusion import create_diffusion
 from opendit.models.dit import DiT_models
 from opendit.models.latte import Latte_models
 from opendit.utils.ckpt_utils import create_logger, load, record_model_param_shape, save
-from opendit.utils.data_utils import prepare_dataloader
+from opendit.utils.data_utils import prepare_dataloader,find_all_linear_modules
 from opendit.utils.operation import model_sharding
 from opendit.utils.pg_utils import ProcessGroupManager
 from opendit.utils.train_utils import all_reduce_mean, format_numel_str, get_model_numel, requires_grad, update_ema
@@ -185,9 +185,21 @@ def main(args):
     requires_grad(ema, False)
     ema_shape_dict = record_model_param_shape(ema)
 
+    from peft import TaskType,LoraConfig,get_peft_model
+    lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                target_modules=find_all_linear_modules(model),
+                modules_to_save=args.additional_target
+            )
+    model = get_peft_model(model, lora_config)
+
     # Create diffusion
     # default: 1000 steps, linear noise schedule
-    diffusion = create_diffusion(timestep_respacing="")
+    diffusion = create_diffusion(timestep_respacing="",diffusion_steps=250)
 
     # Setup optimizer
     # We used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper
@@ -218,17 +230,12 @@ def main(args):
         # master process goes first
         if not coordinator.is_master():
             dist.barrier()
-        #dataset = CIFAR10(args.data_path, transform=get_transforms_image(args.image_size), download=True)
-        #print(next(iter(dataset)))
-        #os.exit(-1)
-        dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), 
-                                            world_size=dist.get_world_size(),  
-                                            description= {"label": "int", "img": "byte",  "width":"int","height":"int","channels":"int"},
+        # dataset = CIFAR10(args.data_path, transform=get_transforms_image(args.image_size), download=True)
+        dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), world_size=dist.get_world_size(),  
                                             transform=get_transforms_image(args.image_size))
         if coordinator.is_master():
             dist.barrier()
 
-    print(args.num_samples)
     if args.num_samples == -1:
         use_sample = True
         dataloader = prepare_dataloader(
@@ -283,6 +290,7 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs...")
     # if resume training, set the sampler start index to the correct value
+
     # todo 
     if use_sample:
         dataloader.sampler.set_start_index(sampler_start_idx)
@@ -307,22 +315,19 @@ def main(args):
                     x = batch["video"].to(device)
                     y = batch["text"]
                 else:
-                    #x, y = next(dataloader_iter)
                     dict_= next(dataloader_iter)
                     x = dict_["image"]
-                    y = dict_['label'].squeeze()
+                    y = dict_['text']
                     #print(dict_)
                     #if isinstance(y, int):
                     #    y = y.to(device)
-
                     x = x.to(device)
-                    y = y.to(device)
+                    #y = y.to(device)
 
                 # VAE encode
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
                     x = vae.encode(x)
-                    # x = b c t h ,w
                     if not args.use_video:
                         x = x.latent_dist.sample().mul_(0.18215)
 
@@ -401,12 +406,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_classes", type=int, default=1000)
     parser.add_argument("--num_samples", type=int, default=-1)
 
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--global_seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--log_every", type=int, default=10)
-    parser.add_argument("--ckpt_every", type=int, default=20)
+    parser.add_argument("--ckpt_every", type=int, default=5)
 
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping value")

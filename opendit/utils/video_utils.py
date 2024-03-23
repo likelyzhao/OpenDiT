@@ -492,12 +492,35 @@ def get_transforms_video(resolution=256):
     )
     return transform_video
 
+def pad(pil_image):
+    from PIL import Image
+    shape = pil_image.size
+    padleft, padright, padbottom ,padtop = 0,0,0,0
+    if shape[1] > shape[0]:
+        padleft = (shape[1] - shape[0])//2
+        padright = shape[1] - shape[0] - padleft
+    else:
+        padtop = (shape[0] - shape[1] )//2
+        padbottom = shape[0] - shape[1] - padtop
+
+    new_width = shape[0] + padright + padleft
+    new_height = shape[1] + padtop + padbottom
+    if new_height == shape[1] and new_width == shape[0]:
+        return pil_image
+    else:
+        result = Image.new(pil_image.mode, (new_width, new_height), (0,0,0))
+        result.paste(pil_image, (padleft, padtop))
+        return result
+
 
 def get_transforms_image(image_size=256):
     transform = transforms.Compose(
         [
             transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
-            transforms.RandomHorizontalFlip(),
+            #transforms.RandomHorizontalFlip(),
+            #transforms.Resize(image_size),
+            #transforms.Lambda(lambda pil_image: pad(pil_image)),
+            transforms.RandomResizedCrop(image_size, scale=(0.95, 1.0), ratio=(0.95, 1.05)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ]

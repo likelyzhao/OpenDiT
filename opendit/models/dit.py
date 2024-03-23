@@ -54,6 +54,7 @@ class DiT(nn.Module):
         sequence_parallel_type: str = None,
         dtype: torch.dtype = torch.float32,
         use_video: bool = False,
+        use_textembed:bool = False,
         text_encoder: str = None,
     ):
         super().__init__()
@@ -68,6 +69,7 @@ class DiT(nn.Module):
         self.sequence_parallel_size = sequence_parallel_size
         self.sequence_parallel_group = sequence_parallel_group
         self.sequence_parallel_type = sequence_parallel_type
+        self.use_textembed = use_textembed
 
         self.dtype = dtype
         if enable_flashattn:
@@ -81,13 +83,18 @@ class DiT(nn.Module):
         if self.use_video:
             self.x_embedder = PatchEmbed3D(patch_size, in_channels, embed_dim=hidden_size)
             self.t_embedder = TimestepEmbedder(hidden_size)
-            self.y_embedder = TextEmbedder(path=text_encoder, hidden_size=hidden_size)
+           # self.y_embedder = TextEmbedder(path=text_encoder, hidden_size=hidden_size)
             self.num_patches = np.prod([input_size[i] // patch_size[i] for i in range(3)])
         else:
             self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
             self.t_embedder = TimestepEmbedder(hidden_size)
-            self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+            #self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
             self.num_patches = self.x_embedder.num_patches
+
+        if self.use_textembed:
+            self.y_embedder = TextEmbedder(path=text_encoder, hidden_size=hidden_size)
+        else:
+            self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
 
         if self.use_video:
             self.num_temporal = input_size[0] // patch_size[0]
@@ -263,18 +270,36 @@ class DiT(nn.Module):
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
+       # print("x shape", x.shape)
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
+        #print("combinedshape",combined.shape)
         model_out = self.forward(combined, t, y)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
-        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
+        #eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
+
+    def forward_with_cfg_v2(self, x, t, y, cfg_scale):
+        """
+        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
+
+        model_out = self.forward(x, t, y)
+        # For exact reproducibility reasons, we apply classifier-free guidance on only
+        # three channels by default. The standard approach to cfg applies it to all channels.
+        # This can be done by uncommenting the following line and commenting-out the line following that.
+        #eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
+
+        return model_out
+
+
 
     def rearrange_attention_weights(self, flag="load"):
         for block in self.blocks:

@@ -36,7 +36,8 @@ def main(args):
         raise ValueError("Please specify a checkpoint path with --ckpt.")
 
     # Load model:
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    # vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae = AutoencoderKL.from_pretrained(f"vae").to(device)
 
     # Configure input size
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
@@ -71,6 +72,7 @@ def main(args):
             enable_layernorm_kernel=False,
             dtype=dtype,
             text_encoder=args.text_encoder,
+            use_textembed=False
         )
         .to(device)
         .to(dtype)
@@ -90,17 +92,44 @@ def main(args):
         n = len(class_labels)
         z = torch.randn(n, vae.out_channels, *input_size, device=device)
         y = class_labels * 2
+
     else:
-        # Labels to condition the model with (feel free to change):
-        if args.num_classes == 1000:
-            class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+        if args.prompts is not None:
+            class_labels = args.prompts.split(",")
+            n = len(class_labels)
+            z = torch.randn(n, 4, input_size, input_size, device=device)
+            class_labels.append("")
+            y = class_labels
+            #y = class_labels*2
+            #y=""
+            print("y=",y )
+            model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
+
+            z = torch.cat([z, z], 0)
+
+            # Sample images:
+            samples = diffusion.p_sample_loop(
+                model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
+            )
+            samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+            samples = vae.decode(samples / 0.18215).sample
+            #save_sample(samples)
+            save_image(samples, "sample.png", nrow=4, normalize=True, value_range=(-1, 1))
+            return 
+
         else:
-            class_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        n = len(class_labels)
-        z = torch.randn(n, 4, input_size, input_size, device=device)
-        y = torch.tensor(class_labels, device=device)
-        y_null = torch.tensor([0] * n, device=device)
-        y = torch.cat([y, y_null], 0)
+        # Labels to condition the model with (feel free to change):
+            if args.num_classes == 9690:
+                class_labels = [207, 360, 549, 974, 88, 2498, 417, 7593]
+            elif args.num_classes == 1000:
+                class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+            else:
+                class_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            n = len(class_labels)
+            z = torch.randn(n, 4, input_size, input_size, device=device)
+            y = torch.tensor(class_labels, device=device)
+            y_null = torch.tensor([0] * n, device=device)
+            y = torch.cat([y, y_null], 0)
 
     # Setup classifier-free guidance:
     z = torch.cat([z, z], 0)
@@ -138,6 +167,12 @@ if __name__ == "__main__":
     parser.add_argument("--text_encoder", type=str, default="openai/clip-vit-base-patch32")
     parser.add_argument(
         "--ckpt",
+        type=str,
+        default=None,
+        help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).",
+    )
+    parser.add_argument(
+        "--prompts",
         type=str,
         default=None,
         help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).",

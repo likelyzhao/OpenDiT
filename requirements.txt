@@ -18,7 +18,7 @@ pytorch_lightning
 h5py
 gdown
 scikit-video
-pyav
+# pyav
 tensorboard
 timm
 matplotlib
@@ -26,4 +26,9 @@ accelerate
 diffusers
 transformers
 flash_attn
+
+protobuf==3.20
+timm
+diffusers
+tfrecord
 colossalai

@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Iterator, Optional
+from typing import Iterator, Optional,List
 
 import numpy as np
 import torch
@@ -42,6 +42,7 @@ def prepare_dataloader(
     batch_size,
     shuffle=False,
     seed=1024,
+    add_sampler=True,
     drop_last=False,
     pin_memory=False,
     num_workers=0,
@@ -70,12 +71,15 @@ def prepare_dataloader(
         :class:`torch.utils.data.DataLoader`: A DataLoader used for training or testing.
     """
     _kwargs = kwargs.copy()
-    sampler = StatefulDistributedSampler(
-        dataset,
-        num_replicas=pg_manager.size(pg_manager.dp_axis),
-        rank=pg_manager.coordinate(pg_manager.dp_axis),
-        shuffle=shuffle,
-    )
+    if add_sampler :
+        sampler = StatefulDistributedSampler(
+            dataset,
+            num_replicas=pg_manager.size(pg_manager.dp_axis),
+            rank=pg_manager.coordinate(pg_manager.dp_axis),
+            shuffle=shuffle,
+        )
+    else:
+        sampler = None
 
     # Deterministic dataloader
     def seed_worker(worker_id):
@@ -137,3 +141,29 @@ class VideoDataset(Dataset):
         video = torch.tensor(np.load(os.path.join(self.data_path, self.video_list[idx])))
         label = torch.tensor(self.label_list[idx])
         return video, label
+
+from transformers.modeling_utils import PreTrainedModel
+def find_all_linear_modules(
+    model: "PreTrainedModel",
+    quantization_bit: Optional[int] = None
+) -> List[str]:
+    if quantization_bit is not None:
+        import bitsandbytes as bnb
+        linear_cls = bnb.nn.Linear4bit if quantization_bit == 4 else bnb.nn.Linear8bitLt
+    else:
+        linear_cls = torch.nn.Linear
+
+    output_layer_names = ["lm_head"]
+    if model.config.model_type == "chatglm":
+        output_layer_names.append("output_layer")
+
+    module_names = set()
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, linear_cls)
+            and not any([output_layer in name for output_layer in output_layer_names])
+        ):
+            module_names.add(name.split(".")[-1])
+
+    print("Found linear modules: {}".format(",".join(module_names)))
+    return list(module_names)
