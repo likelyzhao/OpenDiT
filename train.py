@@ -45,7 +45,8 @@ def main(args):
     """
     Trains a new DiT model.
     """
-    assert torch.cuda.is_available(), "Training currently requires at least one GPU."
+    import torch_npu   
+    assert torch_npu.npu.is_available(), "Training currently requires at least one NPU."
 
     # ==============================
     # Initialize Distributed Training
@@ -223,7 +224,7 @@ def main(args):
         #os.exit(-1)
         dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), 
                                             world_size=dist.get_world_size(),  
-                                            description= {"label": "int", "img": "byte",  "width":"int","height":"int","channels":"int"},
+                                            description= {"text": "byte", "img": "byte",  "width":"int","height":"int","channels":"int"},
                                             transform=get_transforms_image(args.image_size))
         if coordinator.is_master():
             dist.barrier()
@@ -310,13 +311,14 @@ def main(args):
                     #x, y = next(dataloader_iter)
                     dict_= next(dataloader_iter)
                     x = dict_["image"]
-                    y = dict_['label'].squeeze()
+                    y = dict_["text"]
+                    #y = dict_['label'].squeeze()
                     #print(dict_)
                     #if isinstance(y, int):
                     #    y = y.to(device)
 
                     x = x.to(device)
-                    y = y.to(device)
+                    #y = y.to(device)
 
                 # VAE encode
                 with torch.no_grad():

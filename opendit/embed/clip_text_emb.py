@@ -47,7 +47,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
         #print(text, tokens)
         
         outputs = self.transformer(input_ids=tokens)
-
+        #print(outputs)
         z = outputs.last_hidden_state
         pooled_z = outputs.pooler_output
         return z, pooled_z
@@ -63,7 +63,7 @@ class TextEmbedder(nn.Module):
 
     def __init__(self, path, hidden_size, dropout_prob=0.1):
         super().__init__()
-        self.text_encoder = FrozenCLIPEmbedder(path=path)
+        self.text_encoder = FrozenCLIPEmbedder(path=path, device="npu")
         self.dropout_prob = dropout_prob
 
         output_dim = self.text_encoder.transformer.config.hidden_size

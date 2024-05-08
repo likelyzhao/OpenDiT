@@ -516,11 +516,12 @@ def pad(pil_image):
 def get_transforms_image(image_size=256):
     transform = transforms.Compose(
         [
-            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+            #transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
             #transforms.RandomHorizontalFlip(),
-            #transforms.Resize(image_size),
-            #transforms.Lambda(lambda pil_image: pad(pil_image)),
-            transforms.RandomResizedCrop(image_size, scale=(0.95, 1.0), ratio=(0.95, 1.05)),
+            transforms.Resize(image_size),
+            transforms.Lambda(lambda pil_image: pad(pil_image)),
+            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+            #transforms.RandomResizedCrop(image_size, scale=(0.95, 1.0), ratio=(0.95, 1.05)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ]

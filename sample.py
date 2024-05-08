@@ -30,7 +30,9 @@ def main(args):
     # Setup PyTorch:
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    import torch_npu
+
+    device = "npu" if torch_npu.npu.is_available() else "cpu"
 
     if args.ckpt is None:
         raise ValueError("Please specify a checkpoint path with --ckpt.")
@@ -72,7 +74,7 @@ def main(args):
             enable_layernorm_kernel=False,
             dtype=dtype,
             text_encoder=args.text_encoder,
-            use_textembed=False
+            use_textembed=True
         )
         .to(device)
         .to(dtype)
