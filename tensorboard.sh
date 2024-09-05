@@ -1,0 +1,1 @@
+source ../envpy3/bin/activate && tensorboard --logdir ../../checkpoints-fs2/ft --port 9009

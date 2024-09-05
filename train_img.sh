@@ -8,9 +8,10 @@ apt-get update && apt-get install python3-dev -y
     --mixed_precision fp32 \
     --outputs /workspace/mnt/storage/zhaozhijian/checkpoints-fs2/ \
     --data_path /workspace/mnt/storage/zhaozhijian/wudao/jd_10K_tf \
+    --load /workspace/mnt/storage/zhaozhijian/checkpoints-fs2/029-DiT-XL-2/epoch499-global_step2217500/model \
+    --lr 1e-2 \
     --num_samples 141920 \
     --image_size 512 \
-    --epochs 200 \
+    --epochs 600 \
     --ckpt_every 20 \
-    --enable_flashattn \
     --num_classes 9690

@@ -10,7 +10,8 @@
 Sample new images from a pre-trained DiT.
 """
 import argparse
-
+from colossalai.booster import Booster
+from colossalai.booster.plugin import LowLevelZeroPlugin, TorchDDPPlugin
 import torch
 from diffusers.models import AutoencoderKL
 from torchvision.utils import save_image
@@ -72,16 +73,38 @@ def main(args):
             enable_layernorm_kernel=False,
             dtype=dtype,
             text_encoder=args.text_encoder,
-            use_textembed=args.use_textembed,
+            use_textembed=args.use_textembed   
         )
         .to(device)
         .to(dtype)
     )
+##PEFT
+    from peft import TaskType,LoraConfig,get_peft_model
+    lora_config = LoraConfig(
+                inference_mode=False,
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha * args.lora_rank,
+                lora_dropout=args.lora_dropout,
+                target_modules=['qkv'],
+                modules_to_save=args.additional_target
+            )
+    model = get_peft_model(model, lora_config)
+#'base_model.model.module.module.final_layer.adaLN_modulation.1.bias'
+#'base_model.model.final_layer.adaLN_modulation.1.bias')
 
     # Auto-download a pre-trained model or load a custom DiT checkpoint from train.py:
     ckpt_path = args.ckpt
     state_dict = find_model(ckpt_path)
-    model.load_state_dict(state_dict)
+    # new state_dict 
+    new_state_dict = {}
+    for key in state_dict:
+        new_key = key.replace(".module","")
+        new_state_dict[new_key] = state_dict[key]
+    model.load_state_dict(new_state_dict)
+    merged_model = model.merge_and_unload()
+    # OrderedDict(model.named_parameters()).keys()
+    import pdb 
+    pdb.set_trace()
     model.eval()  # important!
     diffusion = create_diffusion(str(args.num_sampling_steps))
     for i in range(100):
@@ -235,6 +258,10 @@ if __name__ == "__main__":
     parser.add_argument("--frame_interval", type=int, default=1)
     parser.add_argument("--use_video", action="store_true", help="Use video data instead of images.")
     parser.add_argument("--text_encoder", type=str, default="openai/clip-vit-base-patch32")
+    parser.add_argument("--lora_rank", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=int, default=1)
+    parser.add_argument("--lora_dropout", type=float, default=0.1)
+    parser.add_argument("--additional_target", type=str, default="")
     parser.add_argument("--use_textembed", action="store_true", help="Use use_textembed")
     parser.add_argument(
         "--ckpt",

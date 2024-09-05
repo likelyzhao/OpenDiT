@@ -142,6 +142,7 @@ class VideoDataset(Dataset):
         label = torch.tensor(self.label_list[idx])
         return video, label
 
+
 from transformers.modeling_utils import PreTrainedModel
 def find_all_linear_modules(
     model: "PreTrainedModel",
@@ -154,9 +155,6 @@ def find_all_linear_modules(
         linear_cls = torch.nn.Linear
 
     output_layer_names = ["lm_head"]
-    if model.config.model_type == "chatglm":
-        output_layer_names.append("output_layer")
-
     module_names = set()
     for name, module in model.named_modules():
         if (

@@ -29,7 +29,7 @@ from opendit.diffusion import create_diffusion
 from opendit.models.dit import DiT_models
 from opendit.models.latte import Latte_models
 from opendit.utils.ckpt_utils import create_logger, load, record_model_param_shape, save
-from opendit.utils.data_utils import prepare_dataloader,find_all_linear_modules
+from opendit.utils.data_utils import prepare_dataloader
 from opendit.utils.operation import model_sharding
 from opendit.utils.pg_utils import ProcessGroupManager
 from opendit.utils.train_utils import all_reduce_mean, format_numel_str, get_model_numel, requires_grad, update_ema
@@ -40,7 +40,6 @@ from opendit.vae.wrapper import AutoencoderKLWrapper
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 
 def main(args):
     """
@@ -94,7 +93,7 @@ def main(args):
             max_norm=args.grad_clip,
         )
     elif args.plugin == "ddp":
-        plugin = TorchDDPPlugin(find_unused_parameters=True)
+        plugin = TorchDDPPlugin()
     else:
         raise ValueError(f"Unknown plugin {args.plugin}")
     booster = Booster(plugin=plugin)
@@ -172,6 +171,14 @@ def main(args):
         .to(dtype)
     )
 
+    model_numel = get_model_numel(model)
+    logger.info(f"Model params: {format_numel_str(model_numel)}")
+    if args.grad_checkpoint:
+        model.enable_gradient_checkpointing()
+
+    #from typing import  OrderedDict
+    #comparekey = "blocks.27.mlp.fc2.weight"
+    #print(OrderedDict(model.named_parameters())[comparekey])
     if args.pretrain is not None:
         from colossalai.checkpoint_io.utils import has_index_file
         from colossalai.checkpoint_io import GeneralCheckpointIO
@@ -179,42 +186,20 @@ def main(args):
         loader = GeneralCheckpointIO() 
 
         if is_index_file:
-            loader.load_sharded_model(model,index_file_path,True)     
+            loader.load_sharded_model(model,index_file_path,True)       
 
-    ### prepare peft 
-    from peft import TaskType,LoraConfig,get_peft_model
-    lora_config = LoraConfig(
-                inference_mode=False,
-                r=args.lora_rank,
-                lora_alpha=args.lora_alpha * args.lora_rank,
-                lora_dropout=args.lora_dropout,
-                target_modules=['proj'],
-                modules_to_save=args.additional_target
-            )
-    model = get_peft_model(model, lora_config)
-    import pdb 
-    pdb.set_trace()
-    model.y_embedder.output_projection.weight.requires_grad = True
-    model.y_embedder.output_projection.bias.requires_grad = True
-    # for item in optimizer.param_groups[0]['params']:
-    #     print(item.shape)
-
-    #print(model.module.module.y_embedder.output_projection.weight.requires_grad)
-    #model = model.module.module
-    #model.module.module.y_embedder.output_projection.weight.requires_grad = True
-    #model.module.module.y_embedder.output_projection.bias.requires_grad = True
-    model_numel = get_model_numel(model)
-    logger.info(f"Model params: {format_numel_str(model_numel)}")
-    if args.grad_checkpoint:
-        model.enable_gradient_checkpointing()
-
+    #print(OrderedDict(model.named_parameters())[comparekey])
+    #import pdb 
+    #pdb.set_trace()
+    # Create ema and vae model
+    # Note that parameter initialization is done within the DiT constructor
+    # Create an EMA of the model for use after training
     ema = model_class(**model_config).to(device)
-    ema = get_peft_model(ema, lora_config)
     ema = ema.to(torch.float32)
     ema.load_state_dict(model.state_dict())
     requires_grad(ema, False)
     ema_shape_dict = record_model_param_shape(ema)
-    logger.info(f"Prepare Lora finish")
+
     # Create diffusion
     # default: 1000 steps, linear noise schedule
     diffusion = create_diffusion(timestep_respacing="")
@@ -229,6 +214,8 @@ def main(args):
     lr_scheduler = None
 
     # Prepare models for training
+    # Ensure EMA is initialized with synced weights
+    update_ema(ema, model, decay=0, sharded=False)
     # important! This enables embedding dropout for classifier-free guidance
     model.train()
     # EMA model should always be in eval mode
@@ -246,12 +233,22 @@ def main(args):
         # master process goes first
         if not coordinator.is_master():
             dist.barrier()
-        # dataset = CIFAR10(args.data_path, transform=get_transforms_image(args.image_size), download=True)
-        dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), world_size=dist.get_world_size(),  
+        #dataset = CIFAR10(args.data_path, transform=get_transforms_image(args.image_size), download=True)
+        #print(next(iter(dataset)))
+        #os.exit(-1)
+        if args.use_textembed:
+            dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), 
+                                            world_size=dist.get_world_size(),  
+                                            transform=get_transforms_image(args.image_size))               
+        else:
+            dataset = MutilTFRecordImageDataset(args.data_path, rank=int(os.environ["RANK"]), 
+                                            world_size=dist.get_world_size(),  
+                                            description= {"label": "int", "img": "byte",  "width":"int","height":"int","channels":"int"},
                                             transform=get_transforms_image(args.image_size))
         if coordinator.is_master():
             dist.barrier()
 
+    print(args.num_samples)
     if args.num_samples == -1:
         use_sample = True
         dataloader = prepare_dataloader(
@@ -306,7 +303,6 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs...")
     # if resume training, set the sampler start index to the correct value
-
     # todo 
     if use_sample:
         dataloader.sampler.set_start_index(sampler_start_idx)
@@ -331,27 +327,33 @@ def main(args):
                     x = batch["video"].to(device)
                     y = batch["text"]
                 else:
+                    #x, y = next(dataloader_iter)
                     dict_= next(dataloader_iter)
                     x = dict_["image"]
-                    y = dict_['text']
+                    if args.use_textembed:
+                        y = dict_['text']
+                    else:
+                        y = dict_['label'].squeeze()
+                        y = y.to(device)
                     #print(dict_)
                     #if isinstance(y, int):
                     #    y = y.to(device)
+                    #import pdb
+                    #pdb.set_trace()
                     x = x.to(device)
-                    #y = y.to(device)
+
 
                 # VAE encode
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
                     x = vae.encode(x)
+                    # x = b c t h ,w
                     if not args.use_video:
                         x = x.latent_dist.sample().mul_(0.18215)
 
                 # Diffusion
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 model_kwargs = dict(y=y)
-                #import pdb
-                #pdb.set_trace()
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 loss = loss_dict["loss"].mean()
                 booster.backward(loss=loss, optimizer=optimizer)
@@ -359,7 +361,6 @@ def main(args):
                 optimizer.zero_grad()
 
                 # Update EMA
-                # update_ema(ema, model.module, optimizer=optimizer, sharded=shard_ema)
                 update_ema(ema, model.module, optimizer=optimizer, sharded=shard_ema)
 
                 # Log loss values:
@@ -425,18 +426,13 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num_classes", type=int, default=1000)
     parser.add_argument("--num_samples", type=int, default=-1)
-    parser.add_argument("--lora_rank", type=int, default=32)
-    parser.add_argument("--lora_alpha", type=int, default=1)
-    parser.add_argument("--lora_dropout", type=float, default=0.1)
-    parser.add_argument("--additional_target", type=str, default="")
 
-
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--global_seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--log_every", type=int, default=10)
-    parser.add_argument("--ckpt_every", type=int, default=5)
+    parser.add_argument("--ckpt_every", type=int, default=20)
 
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping value")

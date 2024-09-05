@@ -6,6 +6,7 @@ from colossalai.zero.low_level.low_level_optim import LowLevelZeroOptimizer
 
 from opendit.models.dit import DiT
 from opendit.models.latte import Latte
+from peft.peft_model import PeftModel
 
 
 def get_model_numel(model: torch.nn.Module) -> int:
@@ -51,7 +52,16 @@ def update_ema(
             continue
         if not sharded:
             param_data = param.data
-            ema_params[name].mul_(decay).add_(param_data, alpha=1 - decay)
+            if name not in ema_params:
+                #print("missing")
+                name = name.replace(".module","")
+                #@import pdb 
+                #pdb.set_trace()
+                if name in ema_params:
+                    ema_params[name].mul_(decay).add_(param_data, alpha=1 - decay)
+                #ema_params[name] = param_data
+            else:
+                ema_params[name].mul_(decay).add_(param_data, alpha=1 - decay)
         else:
             if param.data.dtype != torch.float32 and isinstance(optimizer, LowLevelZeroOptimizer):
                 param_id = id(param)

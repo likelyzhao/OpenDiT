@@ -113,10 +113,12 @@ def load(
     lr_scheduler: _LRScheduler,
     load_dir: str,
     sequence_parallel_type: str,
+    loadmodel: bool = True
 ) -> Tuple[int, int, int]:
-    booster.load_model(model, os.path.join(load_dir, "model"))
-    # ema is not boosted, so we don't use booster.load_model
-    ema.load_state_dict(torch.load(os.path.join(load_dir, "ema.pt"), map_location=torch.device("cpu")))
+    if loadmodel:
+        booster.load_model(model, os.path.join(load_dir, "model"))
+        # ema is not boosted, so we don't use booster.load_model
+        ema.load_state_dict(torch.load(os.path.join(load_dir, "ema.pt"), map_location=torch.device("cpu")), strict=False)
     if optimizer is not None:
         booster.load_optimizer(optimizer, os.path.join(load_dir, "optimizer"))
     if lr_scheduler is not None:
